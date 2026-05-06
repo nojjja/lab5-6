@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS "Tasks" (
+    "Id" SERIAL PRIMARY KEY,
+    "Title" TEXT NOT NULL,
+    "Description" TEXT NULL,
+    "IsCompleted" BOOLEAN NOT NULL DEFAULT FALSE
+);

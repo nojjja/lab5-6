@@ -1,0 +1,8 @@
+.vs/
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.vshost.exe
+*.vshost.exe.config
+*.vshost.exe.manifest
