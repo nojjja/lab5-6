@@ -1,26 +1,102 @@
-name: Build and Push Docker Image
+name: Docker CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build-test-push:
     runs-on: ubuntu-latest
+
+    env:
+      BACK_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/todo-backend:latest
+      UI_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/todo-ui:latest
+      DB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/todo-db:latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Login to Docker Hub
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and Push Backend Image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./TODO
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/todo-backend:latest
+      - name: Build Docker images
+        run: |
+          docker build -t todo-back ./TODO
+          docker build -t todo-ui -f ./TODO/wwwroot/Dockerfile.ui ./TODO/wwwroot
+          docker build -t todo-db ./TODO/db
+
+      - name: Create Docker network
+        run: docker network create todo-network
+
+      - name: Start database container
+        run: docker run -d --name todo-db --network todo-network -p 5432:5432 todo-db
+
+      - name: Start mail container
+        run: >
+          docker run -d --name todo-mail --network todo-network
+          -p 3025:3025 -p 3110:3110 -p 3143:3143
+          -e GREENMAIL_OPTS="-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.setup.test.pop3 -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=test@local:secret"
+          greenmail/standalone:2.1.8
+
+      - name: Start backend container
+        run: docker run -d --name todo-back --network todo-network -p 5000:5000 todo-back
+
+      - name: Start UI container
+        run: docker run -d --name todo-ui --network todo-network -p 8080:80 todo-ui
+
+      - name: Wait for backend
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:5000/swagger/index.html > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs todo-back
+          exit 1
+
+      - name: Wait for UI
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8080 > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs todo-ui
+          exit 1
+
+      - name: Test API and UI endpoints
+        run: |
+          curl -fsS http://localhost:5000/swagger/index.html
+          curl -fsS http://localhost:5000/api/Tasks
+          curl -fsS -X POST http://localhost:5000/api/Tasks \
+            -H "Content-Type: application/json" \
+            -d '{"title":"CI task","isCompleted":false}'
+          curl -fsS http://localhost:5000/api/Tasks
+          curl -fsS http://localhost:8080
+
+      - name: Tag images for Docker Hub
+        run: |
+          docker tag todo-back $BACK_IMAGE
+          docker tag todo-ui $UI_IMAGE
+          docker tag todo-db $DB_IMAGE
+
+      - name: Push images to Docker Hub
+        run: |
+          docker push $BACK_IMAGE
+          docker push $UI_IMAGE
+          docker push $DB_IMAGE
+
+      - name: Cleanup containers, network and local images
+        if: always()
+        run: |
+          docker rm -f todo-ui todo-back todo-db todo-mail || true
+          docker network rm todo-network || true
+          docker image rm todo-back todo-ui todo-db || true
+          docker image rm $BACK_IMAGE $UI_IMAGE $DB_IMAGE || true
